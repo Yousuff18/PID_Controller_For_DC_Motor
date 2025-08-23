@@ -34,13 +34,7 @@ Oscilloscope (optional, for debugging)
 
 **Circuit Connections**
 
-ESP32 Connections: ├── GPIO 25 ──────► D4184 Signal/PWM Input (IN/SIG) ├── GPIO 27 ──────► Photoelectric Sensor Data Output (DO) ├── GND ───────────► Common ground for all components └── 3.3V ──────────► Photoelectric Sensor VCC (if 3.3V rated)
 
-D4184 MOSFET Module: ├── Signal Input ──► From ESP32 GPIO 25 ├── GND ───────────► Common ground ├── VCC ───────────► 12V positive supply └── OUT- ──────────► Motor negative terminal
-
-Motor Circuit: ├── Motor (+) ─────► 12V positive supply ├── Motor (-) ─────► D4184 OUT- terminal └── SR5100 Diode ──► Cathode to 12V+, Anode to Motor-
-
-Power Supply: ├── 12V+ ──────────► Motor positive & D4184 VCC └── GND ───────────► Common ground for entire system
 
 **Hardware Setup Details**
 
