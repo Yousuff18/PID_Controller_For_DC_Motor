@@ -341,3 +341,10 @@ This design allows easy modification of PWM resolution without changing multiple
 
 This PID motor control system provides a robust foundation for precise speed control applications. The modular design allows easy customization for different motors, encoders, and performance requirements. Proper tuning and understanding of the PID parameters will result in stable, accurate motor control suitable for robotics, automation, and educational projects.
 
+**Additional Resources**
+
+PEM Working Principle:
+https://youtu.be/5nwNKPs2gco?si=k48ahiMJ1woKgqzq
+
+Motor Encoder:
+https://youtu.be/zzHcsJDV3_o?si=1aiWTFiLb2CHo_p2
