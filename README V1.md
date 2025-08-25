@@ -34,6 +34,7 @@ Oscilloscope (optional, for debugging)
 
 **Circuit Connections**
 
+![PID_Controller_V1_Schematic Print_page-0001](https://github.com/user-attachments/assets/3fdec424-f9bb-42dd-b450-b6d216d16a04)
 
 
 **Hardware Setup Details**
