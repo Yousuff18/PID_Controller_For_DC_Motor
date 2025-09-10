@@ -6,123 +6,125 @@
 //   12V (+) ------> Motor (+)
 //   Motor (-) ----> D4184 OUT-
 //   Tach Vcc -----> 3V3 (if rated 3.3V)   Tach GND -> GND   Tach DO -> ESP32 GPIO27 (with INPUT_PULLUP)
-//   (If your D4184 board has no flyback diode across the motor, add a Schottky: diode + to 12V, - to motor side.)
 
-/*for custom setup, you can use the same program but tune the Kp, Ki, Kd.
-
-for devs only:
-update the resolution, PWM freq., max duty cycle, channel (don't modify unless you know how to reprogram the pin connections and ranges)*/
+/*for custom setup, you can use the same program but tune the Kp, Ki, Kd.*/
 
 #include <Arduino.h>
 
-// ---------------- USER KNOBS (change these) ----------------
+// ---------------- USER KNOBS ----------------
 const double PULSES_PER_REV = 1.0;   // sensor pulses per RPM 
 double setpointRPM = 300.0;          // target speed in RPM
 
-// PID gains (tune as per performance)
-double Kp = 0.8;                     // proportional gain (unit: duty/RPM)
-double Ki = 2.0;                     // integral gain (unit: duty/(RPM·s))
-double Kd = 0.004;                   // derivative gain (unit: duty·s/RPM)
+// PID gains (tuned for realistic response)
+double Kp = 2.5;    // proportional
+double Ki = 8.0;    // integral
+double Kd = 0.01;   // derivative
 
-// Control loop period (how often we update control)
-const unsigned long CONTROL_PERIOD_MS = 50;  // 50 ms = 20 updates per second
+const double DERIV_ALPHA = 0.7;      // derivative filter smoothing
+
+// Control loop period (update every 50 ms)
+const unsigned long CONTROL_PERIOD_MS = 50;
 
 // ---------------- PINS & PWM SETTINGS ----------------
-const int PWM_PIN = 25;              // PWM output pin to D4184 (pin 25 assigned)
-const int TACH_PIN = 27;             // tach signal pin from photo sensor (pin 27 assigned)
+const int PWM_PIN = 25;              
+const int TACH_PIN = 27;             
 
-// PWM Channel, Resolution, maximum duty cycle, Max freq. range 
-const int    CHANNEL = 0;
-const int    PWM_BITRES    = 12;      // 12-bit resolution -> duty 0-4095
-const int    DUTY_BITMAX     = (1 << PWM_BITRES) - 1;  // 4095 (why not just write 4095? to allow change in bit resolution later on)
-const double PWM_HZ       = 19531.0; // ~19.531 kHz (max feq. for 12-bit resolution but below audio range)
+const int CHANNEL = 0;
+const int PWM_BITRES = 12;
+const int DUTY_BITMAX = (1 << PWM_BITRES) - 1;
+const double PWM_HZ = 19531.0;
 
 // ---------------- SPEED COUNTER (interrupt) ----------------
-volatile unsigned long pulseCount = 0;  // increases by 1 on every photosensor pulse
-
-void IRAM_ATTR onTachRise() { // IRAM_ATTR means Instruction RAM Attribute, this function asks the program to store instruction in IRAM instead of flash for faster access during interrupt
-  // This function runs automatically on every rising edge from the photosensor
-  pulseCount++;
-}
+volatile unsigned long pulseCount = 0;
+void IRAM_ATTR onTachRise() { pulseCount++; }
 
 // ---------------- PID STATE ----------------
-//assumes initial state as zero for simplicity, if not it'll auto-correct during operation
-double rpm      = 0.0;     // latest measured RPM
-double errPrev  = 0.0;     // e[k-1] (last error)
-double integ    = 0.0;     // integral term storage
+double rpm = 0.0;          // latest measured RPM
+double rpmPrev = 0.0;      // previous RPM for derivative
+double integ = 0.0;        // integral term
+double derivFiltered = 0.0;
 
-// Limit the integral so it doesn't grow without bound ("anti-windup")
-const double INTEG_MIN = -3000.0;     // these are conservative, modify as necessary
-const double INTEG_MAX =  3000.0;
+const double INTEG_MIN = -5000.0;
+const double INTEG_MAX = 5000.0;
 
 // ---------------- SETUP ----------------
 void setup() {
   Serial.begin(115200);
   delay(200);
-  Serial.println("ESP32 based PID Speed Control");
-  serial.println("-----------------------------");
+  Serial.println("ESP32 PID Motor Controller - Realistic Tuning");
+  Serial.println("---------------------------------------------");
 
-  // PWM (LEDC)
-  ledcSetup(CHANNEL, PWM_HZ, PWM_BITRES); // configure PWM timer (setup channel selected, PWM freq., bit resolution)
-  ledcAttachPin(PWM_PIN, CHANNEL);       // connect PWM pin to that timer/channel
-  ledcWrite(CHANNEL, 0);                 // start at 0% duty (motor off) 
+  // PWM setup
+  ledcSetup(CHANNEL, PWM_HZ, PWM_BITRES);
+  ledcAttachPin(PWM_PIN, CHANNEL);
+  ledcWrite(CHANNEL, 0);
 
-  // photosensor input set to internal pull-up (active-low logic for sensor input)
+  // Tach input
   pinMode(TACH_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(TACH_PIN), onTachRise, RISING); 
- /*digitalPinToInterrupt is a ISR Function that pauses normal code when there is a change detected
- onTachRise is the function name given to the IRAM_ATTR function
- set to RISING since TACH_PIN is set to active-low logic, thus activates whenever change is detected i.e the photosensor when blocked go from LOW->HIGH*/  
+  attachInterrupt(digitalPinToInterrupt(TACH_PIN), onTachRise, RISING);
 }
 
 // ---------------- MAIN LOOP ----------------
 void loop() {
-  static unsigned long lastMs = 0; // remember when we last updated
-  unsigned long now = millis(); //millis runs kinda forever (49.71 days or 4,294,967,295ms i.e 32-bit) and resets 
-  if (now - lastMs < CONTROL_PERIOD_MS) { 
-    // Not yet time for the next control update; just idle.
-    return;
-  }
-  unsigned long dt_ms = now - lastMs;   // actual elapsed time since last control tick (ms)
-  lastMs = now;                         // mark this tick
+  static unsigned long lastMs = 0;
+  unsigned long now = millis();
+  if (now - lastMs < CONTROL_PERIOD_MS) return;
 
-  // ----- 1) Get how many pulses arrived since last tick -----
+  unsigned long dt_ms = now - lastMs;
+  lastMs = now;
+  double dt_s = dt_ms / 1000.0;
+
+  // ----- 1) Read pulses safely -----
   unsigned long pulses;
-  noInterrupts();            // briefly stop interrupts so the number can't change mid-read
-  pulses = pulseCount;       // copy the shared variable
-  pulseCount = 0;            // reset for the next 50 ms window
-  interrupts();              // turn interrupts back on
+  noInterrupts();
+  pulses = pulseCount;
+  pulseCount = 0;
+  interrupts();
 
   // ----- 2) Convert pulses to RPM -----
-  // If we saw "pulses" in dt seconds, then revs = pulses / PULSES_PER_REV
-  // rev/s = revs / dt_s; RPM = rev/s * 60
-  double dt_s = dt_ms / 1000.0; // ms converted to s
-  double revs = pulses / PULSES_PER_REV; // converts the number of pulses to number of revolutions during during control time window
-  rpm = (revs / dt_s) * 60.0;
+  double revs = pulses / PULSES_PER_REV;
+  double rpmMeasured = (dt_s > 0.0) ? (revs / dt_s) * 60.0 : rpmPrev;
+
+  // Simple filter to smooth RPM
+  const double RPM_ALPHA = 0.8;
+  rpm = RPM_ALPHA * rpm + (1.0 - RPM_ALPHA) * rpmMeasured;
 
   // ----- 3) PID CONTROL -----
-  // Error = (what I want) - (what I measured)
   double error = setpointRPM - rpm;
 
-  // Integral: add error over time
-  // (clamp the integrator to avoid windup if we hit duty limits later)
-  integ += error * dt_s; // integ = integ + error*dt_s
-  if (integ > INTEG_MAX) integ = INTEG_MAX;
-  if (integ < INTEG_MIN) integ = INTEG_MIN;
+  // Derivative on measurement
+  double derivRaw = -(rpm - rpmPrev) / dt_s;
+  derivFiltered = DERIV_ALPHA * derivFiltered + (1.0 - DERIV_ALPHA) * derivRaw;
 
-  // Derivative: change in error over time
-  double deriv = (error - errPrev) / dt_s;
+  // Integral with anti-windup
+  double integCandidate = integ + error * dt_s;
+  if (integCandidate > INTEG_MAX) integCandidate = INTEG_MAX;
+  if (integCandidate < INTEG_MIN) integCandidate = INTEG_MIN;
 
-  // PID output (unclamped)
-  double u = Kp * error + Ki * integ + Kd * deriv;
+  double u_unclamped = Kp * error + Ki * integCandidate + Kd * derivFiltered;
+  if (u_unclamped >= 0.0 && u_unclamped <= DUTY_BITMAX) {
+    integ = integCandidate;  // commit only if output not saturated
+  }
 
-  // Clamp output to valid PWM range
-  if (u < 0) u = 0;
+  // PID output
+  double u = Kp * error + Ki * integ + Kd * derivFiltered;
+  if (u < 0.0) u = 0.0;
   if (u > DUTY_BITMAX) u = DUTY_BITMAX;
 
-  // Remember for next time
-  errPrev = error;
-
-  // ----- 4) Apply PWM duty to D4184 -----
+  // Apply PWM
   ledcWrite(CHANNEL, (int)u);
+
+  // Update previous RPM
+  rpmPrev = rpm;
+
+  // ----- 4) Debug print every 250ms -----
+  static unsigned long dbgT = 0;
+  if (millis() - dbgT > 250) {
+    dbgT = millis();
+    Serial.print("RPM: "); Serial.print(rpm, 1);
+    Serial.print(" | Err: "); Serial.print(error, 1);
+    Serial.print(" | Duty: "); Serial.print((int)u);
+    Serial.print(" | I: "); Serial.print(integ, 1);
+    Serial.print(" | dFilt: "); Serial.println(derivFiltered, 4);
+  }
 }
